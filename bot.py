@@ -505,7 +505,11 @@ async def call_openrouter(prompt: str) -> str | None:
                 log.error(f"OpenRouter HTTP {resp.status}: {body[:300]}")
                 return None
             data = await resp.json()
-            return data["choices"][0]["message"]["content"].strip()
+            try:
+                return data["choices"][0]["message"]["content"].strip()
+            except (KeyError, IndexError) as e:
+                log.error(f"OpenRouter неожиданный формат ответа: {e} | {str(data)[:200]}")
+                return None
 
 
 async def ai_pub_now_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1198,7 +1202,7 @@ async def send_post_to_channel(bot: Bot, post: dict) -> bool:
 
     reply_markup = None
     if buttons:
-        if buttons and isinstance(buttons[0], dict):
+        if isinstance(buttons[0], dict):
             kb_rows = [[InlineKeyboardButton(b["text"], url=b["url"])] for b in buttons]
         else:
             kb_rows = [
@@ -1309,7 +1313,7 @@ async def view_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_map = {"pending": "⏳ Ожидает", "published": "✅ Опубликован", "failed": "❌ Ошибка", "publishing": "🚀 Публикуется"}
     btns = post.get("buttons", [])
     if btns:
-        if btns and isinstance(btns[0], dict):
+        if isinstance(btns[0], dict):
             btn_info = "\n".join(f"  [{b.get('text','?')}]" for b in btns)
         else:
             btn_info = "\n".join(
@@ -1489,9 +1493,8 @@ async def show_templates(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def use_template(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    idx  = int(query.data.replace("tpl_", ""))
-    name = list(TEMPLATES.keys())[idx]
-    tpl  = list(TEMPLATES.values())[idx]
+    idx        = int(query.data.replace("tpl_", ""))
+    name, tpl  = list(TEMPLATES.items())[idx]
     await query.edit_message_text(
         f"📋 *{name}*\n\nСкопируй и используй при создании поста:\n\n`{tpl}`",
         parse_mode=ParseMode.MARKDOWN,
