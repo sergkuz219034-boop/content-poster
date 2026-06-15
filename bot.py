@@ -17,7 +17,7 @@ import aiohttp
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes, ConversationHandler
@@ -167,31 +167,13 @@ def is_admin(update: Update) -> bool:
 
 # ── Главное меню ──────────────────────────────────────────────────────────────
 
-def main_menu_kb():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✏️ Создать пост",   callback_data="create_post"),
-            InlineKeyboardButton("📝 Мои посты",      callback_data="edit_list"),
-        ],
-        [
-            InlineKeyboardButton("🤖 ИИ-вакансия",    callback_data="ai_vacancy_menu"),
-            InlineKeyboardButton("⚙️ Настр. вакансий",callback_data="vacancy_settings_menu"),
-        ],
-        [
-            InlineKeyboardButton("🤖 Автопилот",      callback_data="ap_menu"),
-            InlineKeyboardButton("📅 Контент-план",   callback_data="content_plan"),
-        ],
-        [
-            InlineKeyboardButton("⚙️ Настройки",      callback_data="settings"),
-        ],
-        [
-            InlineKeyboardButton("📋 Шаблоны",        callback_data="templates"),
-            InlineKeyboardButton("🎉 Эмодзи",         callback_data="emoji_cat"),
-        ],
-        [
-            InlineKeyboardButton("❓ Помощь",         callback_data="help_menu"),
-        ],
-    ])
+def main_reply_kb():
+    return ReplyKeyboardMarkup([
+        ["✏️ Создать пост", "🤖 Сгенерировать пост"],
+        ["📝 Мои посты", "⚙️ Настройки"],
+        ["❓ Помощь"]
+    ], resize_keyboard=True)
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
@@ -203,20 +185,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📢 Канал: " + TARGET_CHANNEL + "\n\n"
         "🤖 Новинка: ИИ-генерация вакансий через OpenRouter!\n\n"
         "Выбери действие:",
-        reply_markup=main_menu_kb()
+        reply_markup=main_reply_kb()
     )
 
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
     context.user_data.clear()
-    await update.message.reply_text("📌 Главное меню:", reply_markup=main_menu_kb())
+    await update.message.reply_text("📌 Главное меню:", reply_markup=main_reply_kb())
 
 async def back_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data.clear()
-    await query.edit_message_text("📌 Главное меню:", reply_markup=main_menu_kb())
+    # Удаляем сообщение с inline-кнопками и присылаем новое с reply-клавиатурой
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    await context.bot.send_message(query.message.chat_id, "📌 Главное меню:", reply_markup=main_reply_kb())
+    return ConversationHandler.END
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -226,8 +214,13 @@ async def back_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ai_vacancy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Меню выбора типа ИИ-вакансии."""
     query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
+    if query:
+        await query.answer()
+        send = query.edit_message_text
+    else:
+        send = update.message.reply_text
+
+    await send(
         "🤖 *ИИ-генерация вакансии*\n\n"
         "Выбери тип вакансии — ИИ напишет текст, ты его одобришь перед публикацией:",
         parse_mode=ParseMode.MARKDOWN,
@@ -531,7 +524,7 @@ async def ai_pub_now_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "photo"      : photo_file_id,
         "video"      : None,
         "buttons"    : buttons,
-        "publish_at" : "now",
+        "publish_at" : "сейчас",
         "status"     : "publishing",
         "created_at" : datetime.now().strftime("%d.%m.%Y %H:%M"),
         "source"     : "ai",
@@ -544,7 +537,11 @@ async def ai_pub_now_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     update_post(post["id"], {"status": "published" if ok else "failed"})
 
     result = "✅ Вакансия опубликована в канале!" if ok else "❌ Ошибка при публикации."
-    await query.edit_message_text(result, reply_markup=main_menu_kb())
+    try:
+        await query.message.delete()
+    except:
+        pass
+    await context.bot.send_message(query.message.chat_id, result, reply_markup=main_reply_kb())
     context.user_data.clear()
 
 
@@ -575,7 +572,7 @@ async def ai_scheduled_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons     = _make_vacancy_buttons(vac_type, cfg, chosen_link)
 
     dt_str = query.data.replace("sched_", "")
-    if dt_str == "now":
+    if dt_str == "сейчас":
         dt_str = datetime.now().strftime("%d.%m.%Y %H:%M")
 
     post = {
@@ -596,7 +593,7 @@ async def ai_scheduled_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"✅ Вакансия запланирована!\n📅 Дата: `{dt_str}`\n🆔 ID: `{post['id']}`",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_menu_kb()
+        reply_markup=main_reply_kb()
     )
     context.user_data.clear()
 
@@ -660,219 +657,39 @@ def _make_vacancy_buttons(vac_type: str, cfg: dict, chosen_link: dict = None) ->
     return buttons
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  ⚙️ НАСТРОЙКИ ВАКАНСИЙ
-# ══════════════════════════════════════════════════════════════════════════════
-
-async def vacancy_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        "⚙️ *Настройки вакансий*\n\nВыбери тип для редактирования:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🏠 Настройки: Удалёнка",   callback_data="vsett_remote")],
-            [InlineKeyboardButton("🚴 Настройки: Курьер",     callback_data="vsett_courier")],
-            [InlineKeyboardButton("← Назад",                   callback_data="back_menu")],
-        ])
-    )
-
-async def vacancy_settings_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    vac_type = query.data.replace("vsett_", "")
-    cfg = load_vacancy_config().get(vac_type, DEFAULT_VACANCY_CONFIG[vac_type])
-    type_label = "Удалённая работа" if vac_type == "remote" else "Курьер"
-
-    offer_str = "\n".join(f"• {o}" for o in cfg.get("offer", []))
-    req_str   = "\n".join(f"• {r}" for r in cfg.get("requirements", []))
-
-    text = (
-        f"⚙️ *{type_label}* — текущие настройки:\n\n"
-        f"💰 Зарплата: `{cfg.get('salary_min', 0):,} – {cfg.get('salary_max', 0):,} ₽`\n"
-        f"🕐 График: `{cfg.get('schedule', '—')}`\n"
-        f"🏢 О компании: _{cfg.get('company_info', '—')}_\n\n"
-        f"✅ *Что предлагаем:*\n{offer_str}\n\n"
-        f"📋 *Требования:*\n{req_str}\n\n"
-        f"🔗 Ссылки:\n" + "\n".join(f"  {i+1}. `{l.get('url','—')}` ({l.get('label','?')})" for i, l in enumerate(cfg.get("links", [])))
-    )
-    await query.edit_message_text(
-        text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✏️ Изменить зарплату",   callback_data=f"vedit_salary_{vac_type}")],
-            [InlineKeyboardButton("✏️ Изменить ссылки",     callback_data=f"vedit_links_{vac_type}")],
-            [InlineKeyboardButton("✏️ Изменить график",     callback_data=f"vedit_sched_{vac_type}")],
-            [InlineKeyboardButton("← Назад",                callback_data="vacancy_settings_menu")],
-        ])
-    )
-
-# ── Редактирование ссылок (ConversationHandler ниже) ─────────────────────────
-
-VEDIT_WAIT_LINK_MAIN, VEDIT_WAIT_LINK_ALT, VEDIT_WAIT_SALARY, VEDIT_WAIT_SCHED = range(20, 24)
-
-async def vedit_links_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    vac_type = query.data.replace("vedit_links_", "")
-    context.user_data["vedit_type"] = vac_type
-    cfg   = load_vacancy_config().get(vac_type, DEFAULT_VACANCY_CONFIG[vac_type])
-    links = cfg.get("links", [])
-    cur1  = links[0]["url"] if links else "—"
-    btn1  = "📝 Откликнуться" if vac_type == "remote" else "🚴 Откликнуться"
-    await query.edit_message_text(
-        f"🔗 *Ссылка 1 (кнопка «{btn1}»)*\n\n"
-        f"Текущая: `{cur1}`\n\n"
-        "Отправь новую ссылку:",
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return VEDIT_WAIT_LINK_MAIN
-
-async def vedit_got_link_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    link = update.message.text.strip()
-    if not link.startswith("http"):
-        await update.message.reply_text("❌ Ссылка должна начинаться с http(s)://")
-        return VEDIT_WAIT_LINK_MAIN
-    context.user_data["vedit_link_main"] = link
-    vac_type = context.user_data.get("vedit_type", "remote")
-    cfg   = load_vacancy_config().get(vac_type, DEFAULT_VACANCY_CONFIG[vac_type])
-    links = cfg.get("links", [])
-    cur2  = links[1]["url"] if len(links) > 1 else "—"
-    await update.message.reply_text(
-        f"🔗 *Ссылка 2*\n\n"
-        f"Текущая: `{cur2}`\n\n"
-        "Отправь новую ссылку или /skip чтобы оставить без изменений:",
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return VEDIT_WAIT_LINK_ALT
-
-async def vedit_got_link_alt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    link = update.message.text.strip()
-    if link == "/skip":
-        link = context.user_data.get("vedit_link_main", "")
-    elif not link.startswith("http"):
-        await update.message.reply_text("❌ Ссылка должна начинаться с http(s)://  или /skip")
-        return VEDIT_WAIT_LINK_ALT
-
-    vac_type = context.user_data.get("vedit_type", "remote")
-    cfg = load_vacancy_config()
-    cfg.setdefault(vac_type, DEFAULT_VACANCY_CONFIG[vac_type].copy())
-    link1 = context.user_data.get("vedit_link_main", "")
-    existing_links = cfg[vac_type].get("links", DEFAULT_VACANCY_CONFIG[vac_type]["links"])
-    label1 = existing_links[0]["label"] if existing_links else "Ссылка 1"
-    label2 = existing_links[1]["label"] if len(existing_links) > 1 else "Ссылка 2"
-    if link == context.user_data.get("vedit_link_main", ""):
-        link = existing_links[1]["url"] if len(existing_links) > 1 else link
-    cfg[vac_type]["links"] = [
-        {"url": link1, "label": label1},
-        {"url": link,  "label": label2},
-    ]
-    save_vacancy_config(cfg)
-
-    await update.message.reply_text(
-        "✅ Ссылки обновлены!",
-        reply_markup=main_menu_kb()
-    )
-    context.user_data.clear()
-    return ConversationHandler.END
-
-async def vedit_salary_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    vac_type = query.data.replace("vedit_salary_", "")
-    context.user_data["vedit_type"] = vac_type
-    cfg = load_vacancy_config().get(vac_type, DEFAULT_VACANCY_CONFIG[vac_type])
-    await query.edit_message_text(
-        f"💰 *Зарплата*\n\n"
-        f"Текущая: `{cfg.get('salary_min',0):,} – {cfg.get('salary_max',0):,} ₽`\n\n"
-        "Введи диапазон через дефис:\n`60000-110000`",
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return VEDIT_WAIT_SALARY
-
-async def vedit_got_salary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip().replace(" ", "")
-    try:
-        parts = text.split("-")
-        sal_min, sal_max = int(parts[0]), int(parts[1])
-    except Exception:
-        await update.message.reply_text("❌ Формат: `60000-110000`", parse_mode=ParseMode.MARKDOWN)
-        return VEDIT_WAIT_SALARY
-    vac_type = context.user_data.get("vedit_type", "remote")
-    cfg = load_vacancy_config()
-    cfg.setdefault(vac_type, DEFAULT_VACANCY_CONFIG[vac_type].copy())
-    cfg[vac_type]["salary_min"] = sal_min
-    cfg[vac_type]["salary_max"] = sal_max
-    save_vacancy_config(cfg)
-    await update.message.reply_text("✅ Зарплата обновлена!", reply_markup=main_menu_kb())
-    context.user_data.clear()
-    return ConversationHandler.END
-
-async def vedit_sched_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    vac_type = query.data.replace("vedit_sched_", "")
-    context.user_data["vedit_type"] = vac_type
-    cfg = load_vacancy_config().get(vac_type, DEFAULT_VACANCY_CONFIG[vac_type])
-    await query.edit_message_text(
-        f"🕐 *График работы*\n\nТекущий: `{cfg.get('schedule', '—')}`\n\nВведи новый:",
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return VEDIT_WAIT_SCHED
-
-async def vedit_got_sched(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    vac_type = context.user_data.get("vedit_type", "remote")
-    cfg = load_vacancy_config()
-    cfg.setdefault(vac_type, DEFAULT_VACANCY_CONFIG[vac_type].copy())
-    cfg[vac_type]["schedule"] = update.message.text.strip()
-    save_vacancy_config(cfg)
-    await update.message.reply_text("✅ График обновлён!", reply_markup=main_menu_kb())
-    context.user_data.clear()
-    return ConversationHandler.END
-
 
 # ── Помощь ────────────────────────────────────────────────────────────────────
 
 async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    if query:
+        await query.answer()
+        send = query.edit_message_text
+    else:
+        send = update.message.reply_text
     text = (
-        "❓ *Справка по боту*\n\n"
-        "*🤖 ИИ-вакансия:*\n"
-        "Нажми «ИИ-вакансия» → выбери тип → настрой параметры → одобри и опубликуй\n\n"
-        "*Создание поста:*\n"
-        "1. Напиши текст поста\n"
-        "2. Прикрепи фото/видео (или пропусти)\n"
-        "3. Добавь кнопки (или пропусти)\n"
-        "4. Выбери время публикации\n\n"
-        "*Формат кнопок:*\n"
-        "`Текст - https://ссылка`\n"
-        "В ряд через `|`:\n"
-        "`Кнопка 1 - https://url | Кнопка 2 - https://url`\n\n"
-        "*Команды:*\n"
-        "/start — перезапуск\n"
-        "/menu — главное меню\n"
-        "/skip — пропустить шаг"
+        "❓ *Помощь по боту*\n\n"
+        "1. Создай пост (текст + медиа + кнопки).\n"
+        "2. Выбери время: прямо сейчас или отложи.\n"
+        "3. Бот опубликует всё сам!\n\n"
+        "🔗 *Кнопки:* формат `Текст - ссылка`.\n"
+        "Можно использовать цвета: `!b`, `!g`, `!r`."
     )
-    await query.edit_message_text(
-        text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="back_menu")]])
-    )
+    await send(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="back_menu")]]))
 
 
 # ── Создание поста ────────────────────────────────────────────────────────────
 
 async def create_post_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    context.user_data["new_post"] = {"buttons": []}
-    await query.edit_message_text(
-        "✏️ *Создание поста*\n\n"
-        "Напиши текст поста.\n"
-        "Поддерживается HTML-форматирование:\n"
-        "`<b>жирный</b>` `<i>курсив</i>` `<u>подчёркнутый</u>`\n\n"
-        "Или /skip — без текста.",
+    if query:
+        await query.answer()
+        send = query.edit_message_text
+    else:
+        send = update.message.reply_text
+    context.user_data["new_post"] = {"id": new_id(), "status": "pending"}
+    await send(
+        "📝 *Создание поста*\n\nПришли текст поста (или нажми /menu для отмены).",
         parse_mode=ParseMode.MARKDOWN
     )
     return WAIT_TEXT
@@ -885,7 +702,8 @@ async def got_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🖼 Прикрепи фото или видео.\n"
         "Или нажми /skip — без медиа.",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏩ Пропустить медиа", callback_data="media_skip")]
+            [InlineKeyboardButton("⏩ Пропустить медиа", callback_data="media_skip")],
+            [InlineKeyboardButton("← Отмена", callback_data="back_menu")]
         ])
     )
     return WAIT_MEDIA
@@ -927,9 +745,16 @@ async def send_button_menu_chat(chat_id, context, bot):
 
 # ── Построитель кнопок ────────────────────────────────────────────────────────
 
+# Маппинг префиксов на стили Telegram API 9.4
 COLOR_MAP = {
-    "!r": "🔴", "!g": "🟢", "!b": "🔵", "!y": "🟡",
-    "!o": "🟠", "!p": "🟣", "!w": "⚪", "!k": "⚫",
+    "!r": {"emoji": "🔴", "style": "danger"},
+    "!g": {"emoji": "🟢", "style": "success"},
+    "!b": {"emoji": "🔵", "style": "primary"},
+    "!y": {"emoji": "🟡", "style": None},
+    "!o": {"emoji": "🟠", "style": None},
+    "!p": {"emoji": "🟣", "style": None},
+    "!w": {"emoji": "⚪", "style": None},
+    "!k": {"emoji": "⚫", "style": None},
 }
 
 def parse_buttons(raw: str) -> list:
@@ -942,10 +767,13 @@ def parse_buttons(raw: str) -> list:
         cells = [c.strip() for c in line.split("|")]
         for cell in cells:
             cell = cell.strip()
+            style = None
             color_emoji = ""
-            for prefix, emoji in COLOR_MAP.items():
+            for prefix, info in COLOR_MAP.items():
                 if cell.lower().startswith(prefix + " "):
-                    color_emoji = emoji + " "
+                    # Для цветных кнопок (!r !g !b) — без эмодзи, цвет передаётся через style
+                    color_emoji = "" if info["style"] else info["emoji"] + " "
+                    style = info["style"]
                     cell = cell[len(prefix)+1:].strip()
                     break
             if " - " in cell:
@@ -953,7 +781,10 @@ def parse_buttons(raw: str) -> list:
                 text = parts[0].strip()
                 url  = parts[1].strip()
                 if url.startswith("http"):
-                    row.append({"text": f"{color_emoji}{text}", "url": url})
+                    btn = {"text": f"{color_emoji}{text}", "url": url}
+                    if style:
+                        btn["style"] = style
+                    row.append(btn)
         if row:
             result.append(row)
     return result
@@ -972,6 +803,7 @@ def button_menu_kb():
         [InlineKeyboardButton("✅ Готово — выбрать время", callback_data="btn_done")],
         [InlineKeyboardButton("🗑 Очистить кнопки",        callback_data="btn_clear")],
         [InlineKeyboardButton("⏩ Без кнопок",             callback_data="btn_done")],
+        [InlineKeyboardButton("← Отмена",                  callback_data="back_menu")],
     ])
 
 async def send_button_menu(message, context: ContextTypes.DEFAULT_TYPE):
@@ -982,9 +814,10 @@ async def send_button_menu(message, context: ContextTypes.DEFAULT_TYPE):
         "Отправь кнопки в формате:\n"
         "`Текст - https://ссылка`\n"
         "В ряд через `|`\n\n"
-        "Цвет:\n"
-        "`!r` 🔴  `!g` 🟢  `!b` 🔵  `!y` 🟡\n"
-        "`!o` 🟠  `!p` 🟣  `!w` ⚪  `!k` ⚫"
+        "Цвет кнопки (реальный цвет в Telegram):\n"
+        "`!b` 🔵 Синяя  `!g` 🟢 Зелёная  `!r` 🔴 Красная\n"
+        "Остальные цвета (только эмодзи):\n"
+        "`!y` 🟡  `!o` 🟠  `!p` 🟣  `!w` ⚪  `!k` ⚫"
     )
     await message.reply_text(hint, parse_mode=ParseMode.MARKDOWN, reply_markup=button_menu_kb())
 
@@ -1042,6 +875,7 @@ def schedule_picker_kb():
         [InlineKeyboardButton(f"🌃 Завтра вечером  {tomor_eve.strftime('%H:%M')}",     callback_data=f"sched_{fmt(tomor_eve)}")],
         [InlineKeyboardButton(f"📅 Через неделю  {in_week.strftime('%d.%m')}",         callback_data=f"sched_{fmt(in_week)}")],
         [InlineKeyboardButton("🗓 Выбрать дату вручную",                               callback_data="sched_custom")],
+        [InlineKeyboardButton("← Отмена",                                              callback_data="back_menu")],
     ])
 
 async def got_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1049,14 +883,15 @@ async def got_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "sched_now":
-        context.user_data["new_post"]["publish_at"] = "now"
+        context.user_data["new_post"]["publish_at"] = "сейчас"
         await finish_post_query(query, context)
         return ConversationHandler.END
 
     if query.data == "sched_custom":
         await query.edit_message_text(
             "📅 Напиши дату публикации:\nФормат: `ДД.ММ.ГГГГ`\nПример: `25.03.2026`",
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Отмена", callback_data="back_menu")]])
         )
         return WAIT_DATE
 
@@ -1080,7 +915,8 @@ async def got_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["new_post"]["date"] = text
         await update.message.reply_text(
             "🕐 Напиши время публикации:\nФормат: `ЧЧ:ММ`\nПример: `20:00`",
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Отмена", callback_data="back_menu")]])
         )
         return WAIT_TIME
     except ValueError:
@@ -1099,7 +935,8 @@ async def got_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ Время: `{context.user_data['new_post']['publish_at']}`\n\n"
         "🔁 *Автоповтор?* Напиши через сколько дней (например `7`).\nИли напиши /skip.",
-        parse_mode=ParseMode.MARKDOWN
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Отмена", callback_data="back_menu")]])
     )
     return WAIT_REPEAT
 
@@ -1126,16 +963,16 @@ async def got_repeat_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Сохранение и публикация ───────────────────────────────────────────────────
 
 def _build_post(np: dict) -> dict:
-    publish_at = np.get("publish_at", "now")
+    publish_at = np.get("publish_at", "сейчас")
     return {
-        "id"         : new_id(),
+        "id"         : np.get("id", new_id()),
         "text"       : np.get("text", ""),
         "photo"      : np.get("photo"),
         "video"      : np.get("video"),
         "buttons"    : np.get("buttons", []),
         "publish_at" : publish_at,
         "repeat_days": np.get("repeat_days"),
-        "status"     : "pending" if publish_at != "now" else "publishing",
+        "status"     : "pending" if publish_at != "сейчас" else "publishing",
         "created_at" : datetime.now().strftime("%d.%m.%Y %H:%M"),
     }
 
@@ -1163,7 +1000,7 @@ async def finish_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         _post_saved_msg(post),
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_menu_kb()
+        reply_markup=main_reply_kb()
     )
     if post["status"] == "publishing":
         ok = await send_post_to_channel(context.bot, post)
@@ -1177,7 +1014,7 @@ async def finish_post_query(query, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         _post_saved_msg(post),
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_menu_kb()
+        reply_markup=main_reply_kb()
     )
     if post["status"] == "publishing":
         ok = await send_post_to_channel(context.bot, post)
@@ -1186,6 +1023,60 @@ async def finish_post_query(query, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── Отправка в канал ──────────────────────────────────────────────────────────
+
+def _build_raw_keyboard(buttons: list) -> dict | None:
+    """Строит клавиатуру для raw API с поддержкой поля style (Bot API 9.4)."""
+    if not buttons:
+        return None
+    # Определяем, нужен ли raw (есть ли хоть одна кнопка со style)
+    has_style = False
+    # Нормализуем: buttons может быть list[dict] или list[list[dict]]
+    if buttons and isinstance(buttons[0], dict):
+        rows = [[b] for b in buttons]
+    else:
+        rows = buttons
+    for row in rows:
+        for b in row:
+            if b.get("style"):
+                has_style = True
+    if not has_style:
+        return None  # Можно использовать обычный InlineKeyboardMarkup
+    # Строим raw JSON для Telegram
+    raw_rows = []
+    for row in rows:
+        raw_row = []
+        for b in row:
+            btn = {"text": b["text"], "url": b["url"]}
+            if b.get("style"):
+                btn["style"] = b["style"]
+            raw_row.append(btn)
+        raw_rows.append(raw_row)
+    return {"inline_keyboard": raw_rows}
+
+
+async def _send_raw_to_channel(payload: dict) -> bool:
+    """Отправка через прямой HTTP-запрос к Telegram API (для поддержки style)."""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            body = await resp.json()
+            if resp.status == 200:
+                return True
+            log.error(f"❌ Raw API ошибка: {body}")
+            return False
+
+
+async def _send_raw_photo_to_channel(payload: dict) -> bool:
+    """Отправка фото через прямой HTTP-запрос к Telegram API."""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            body = await resp.json()
+            if resp.status == 200:
+                return True
+            log.error(f"❌ Raw API фото ошибка: {body}")
+            return False
+
 
 async def send_post_to_channel(bot: Bot, post: dict) -> bool:
     raw_text = post.get("text", "")
@@ -1196,7 +1087,30 @@ async def send_post_to_channel(bot: Bot, post: dict) -> bool:
     has_html = any(tag in raw_text for tag in ("<b>", "<i>", "<u>", "<s>", "<a ", "<code>", "<pre>", "<tg-"))
     safe_text = raw_text if has_html else html_module.escape(raw_text)
 
-    reply_markup = None
+    # Проверяем, нужна ли raw-отправка (есть ли кнопки с style)
+    raw_kb = _build_raw_keyboard(buttons)
+
+    if raw_kb:
+        # Отправляем через прямой API-запрос с поддержкой style
+        import json as _json
+        payload = {
+            "chat_id": TARGET_CHANNEL,
+            "parse_mode": "HTML",
+            "reply_markup": raw_kb,
+        }
+        if photo:
+            payload["photo"] = photo
+            payload["caption"] = safe_text
+            ok = await _send_raw_photo_to_channel(payload)
+        else:
+            payload["text"] = safe_text or "."
+            ok = await _send_raw_to_channel(payload)
+        if ok:
+            log.info(f"✅ Пост {post['id']} опубликован (raw API с цветными кнопками)")
+            return True
+        log.error(f"❌ Ошибка raw отправки, пробуем обычный метод")
+
+    # Обычная отправка через библиотеку
     if buttons:
         if buttons and isinstance(buttons[0], dict):
             kb_rows = [[InlineKeyboardButton(b["text"], url=b["url"])] for b in buttons]
@@ -1206,6 +1120,8 @@ async def send_post_to_channel(bot: Bot, post: dict) -> bool:
                 for row in buttons
             ]
         reply_markup = InlineKeyboardMarkup(kb_rows)
+    else:
+        reply_markup = None
 
     async def _try_send(txt, pm):
         if photo:
@@ -1234,46 +1150,18 @@ async def send_post_to_channel(bot: Bot, post: dict) -> bool:
         return False
 
 
-# ── Контент-план ──────────────────────────────────────────────────────────────
-
-async def content_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    pending = [p for p in load_posts() if p.get("status") == "pending"]
-    if not pending:
-        await query.edit_message_text(
-            "📅 *Контент-план пуст*\n\nНет запланированных постов.",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="back_menu")]])
-        )
-        return
-    text    = "📅 *Запланированные посты:*\n\n"
-    buttons = []
-    for p in pending:
-        preview = (p.get("text") or "📷 Медиа")[:35]
-        source  = " 🤖" if p.get("source") == "ai" else ""
-        repeat  = f" 🔁{p['repeat_days']}д" if p.get("repeat_days") else ""
-        text   += f"🕐 `{p['publish_at']}`{repeat}{source} — {preview}\n"
-        buttons.append([InlineKeyboardButton(
-            f"📌 {p['publish_at']} — {preview[:25]}",
-            callback_data=f"post_{p['id']}"
-        )])
-    buttons.append([InlineKeyboardButton("← Назад", callback_data="back_menu")])
-    await query.edit_message_text(
-        text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-
 # ── Список постов ─────────────────────────────────────────────────────────────
 
 async def edit_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    if query:
+        await query.answer()
+        send = query.edit_message_text
+    else:
+        send = update.message.reply_text
     posts = load_posts()
     if not posts:
-        await query.edit_message_text(
+        await send(
             "📋 Постов пока нет.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="back_menu")]])
         )
@@ -1288,7 +1176,7 @@ async def edit_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             callback_data=f"post_{p['id']}"
         )])
     buttons.append([InlineKeyboardButton("← Назад", callback_data="back_menu")])
-    await query.edit_message_text(
+    await send(
         "📝 *Все посты:* (🤖 = ИИ-вакансия)",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup(buttons)
@@ -1335,10 +1223,13 @@ async def view_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("📅 Изменить дату",  callback_data=f"editdate_{post_id}"),
         ],
         [
-            InlineKeyboardButton("📋 Дублировать",    callback_data=f"dup_{post_id}"),
+            InlineKeyboardButton("🕐 Запланировать",  callback_data=f"reschedule_{post_id}"),
             InlineKeyboardButton("🔥 Опубликовать",   callback_data=f"pubnow_{post_id}"),
         ],
-        [InlineKeyboardButton("🗑 Удалить пост",      callback_data=f"del_confirm_{post_id}")],
+        [
+            InlineKeyboardButton("📋 Дублировать",    callback_data=f"dup_{post_id}"),
+            InlineKeyboardButton("🗑 Удалить пост",   callback_data=f"del_confirm_{post_id}"),
+        ],
         [InlineKeyboardButton("← Назад",              callback_data="edit_list")],
     ])
     await query.edit_message_text(info, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
@@ -1405,8 +1296,56 @@ async def del_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("← Меню",      callback_data="back_menu")],
     ]))
 
+async def reschedule_post_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Открывает пикер расписания для уже существующего поста."""
+    query = update.callback_query
+    await query.answer()
+    post_id = query.data.replace("reschedule_", "")
+    context.user_data["rescheduling_id"] = post_id
+    await query.edit_message_text(
+        "⏰ *Выбери новое время публикации:*",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=schedule_picker_kb()
+    )
 
-# ── Редактирование ────────────────────────────────────────────────────────────
+
+async def reschedule_post_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает выбор нового времени из пикера."""
+    query = update.callback_query
+    await query.answer()
+    post_id = context.user_data.get("rescheduling_id")
+    if not post_id:
+        try:
+            await query.message.delete()
+        except:
+            pass
+        await context.bot.send_message(query.message.chat_id, "❌ Ошибка: пост не найден.", reply_markup=main_reply_kb())
+        return
+
+    dt_str = query.data.replace("sched_", "")
+    if dt_str == "сейчас":
+        dt_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+    if dt_str == "custom":
+        # Для ручного ввода — пока просто возвращаем в меню
+        await query.edit_message_text(
+            "📅 Напиши дату и время:\n`ДД.ММ.ГГГГ ЧЧ:ММ`\nПример: `25.03.2026 20:00`",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Отмена", callback_data=f"post_{post_id}")]])
+        )
+        return
+
+    update_post(post_id, {"publish_at": dt_str, "status": "pending"})
+    context.user_data.pop("rescheduling_id", None)
+    await query.edit_message_text(
+        f"✅ *Пост перепланирован!*\n📅 Новое время: `{dt_str}`",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📌 Открыть пост", callback_data=f"post_{post_id}")],
+            [InlineKeyboardButton("← Меню",         callback_data="back_menu")],
+        ])
+    )
+
+
 
 async def edit_text_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1423,7 +1362,7 @@ async def edit_text_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def edit_text_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_post(context.user_data.get("editing_id"), {"text": update.message.text})
-    await update.message.reply_text("✅ Текст обновлён!", reply_markup=main_menu_kb())
+    await update.message.reply_text("✅ Текст обновлён!", reply_markup=main_reply_kb())
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -1448,10 +1387,14 @@ async def edit_date_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAIT_EDIT_DATE
     dt_str = query.data.replace("sched_", "")
-    if dt_str == "now":
+    if dt_str == "сейчас":
         dt_str = datetime.now().strftime("%d.%m.%Y %H:%M")
     update_post(context.user_data.get("editing_id"), {"publish_at": dt_str, "status": "pending"})
-    await query.edit_message_text(f"✅ Дата обновлена: `{dt_str}`", parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu_kb())
+    try:
+        await query.message.delete()
+    except:
+        pass
+    await context.bot.send_message(query.message.chat_id, f"✅ Дата обновлена: `{dt_str}`", parse_mode=ParseMode.MARKDOWN, reply_markup=main_reply_kb())
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -1460,65 +1403,12 @@ async def edit_date_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         datetime.strptime(text, "%d.%m.%Y %H:%M")
         update_post(context.user_data.get("editing_id"), {"publish_at": text, "status": "pending"})
-        await update.message.reply_text("✅ Дата обновлена!", reply_markup=main_menu_kb())
+        await update.message.reply_text("✅ Дата обновлена!", reply_markup=main_reply_kb())
         context.user_data.clear()
         return ConversationHandler.END
     except ValueError:
         await update.message.reply_text("❌ Неверный формат.\nПример: `25.03.2026 20:00`", parse_mode=ParseMode.MARKDOWN)
         return WAIT_EDIT_DATE
-
-
-# ── Шаблоны ───────────────────────────────────────────────────────────────────
-
-TEMPLATES = {
-    "📢 Анонс":        "📢 <b>АНОНС</b>\n\n✍️ Текст анонса...\n\n📅 Дата: \n📍 Место: ",
-    "🔥 Акция":        "🔥 <b>АКЦИЯ</b>\n\n💥 Описание акции...\n\n⏰ Действует до: ",
-    "💼 Вакансия":     "💼 <b>ВАКАНСИЯ</b>\n\n🏢 Компания: \n📌 Должность: \n💰 Зарплата: ",
-    "📊 Вопрос дня":   "📊 <b>ВОПРОС ДНЯ</b>\n\n❓ Твой вопрос...\n\n👇 Ответь в комментариях!",
-    "🎉 Поздравление": "🎉 <b>ПОЗДРАВЛЯЕМ!</b>\n\n🥳 Текст поздравления...\n\n❤️ Ваша команда",
-    "📌 Новость":      "📌 <b>НОВОСТЬ</b>\n\nТекст новости...\n\n🔗 Подробнее: ",
-}
-
-async def show_templates(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    btns = [[InlineKeyboardButton(name, callback_data=f"tpl_{i}")] for i, name in enumerate(TEMPLATES)]
-    btns.append([InlineKeyboardButton("← Назад", callback_data="back_menu")])
-    await query.edit_message_text("📋 *Выбери шаблон:*", parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(btns))
-
-async def use_template(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    idx  = int(query.data.replace("tpl_", ""))
-    name = list(TEMPLATES.keys())[idx]
-    tpl  = list(TEMPLATES.values())[idx]
-    await query.edit_message_text(
-        f"📋 *{name}*\n\nСкопируй и используй при создании поста:\n\n`{tpl}`",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✏️ Создать пост", callback_data="create_post")],
-            [InlineKeyboardButton("← Шаблоны",       callback_data="templates")],
-        ])
-    )
-
-
-# ── Эмодзи ───────────────────────────────────────────────────────────────────
-
-async def emoji_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        "🎉 *Каталог эмодзи* — скопируй нужные:\n\n"
-        "🎉 🔥 💥 ⭐ 🚀 💡 📢 📌 ✅ ❌ 💰 🎁 🏆 🎯 📊 💼 🔑 🌟 💎 👑\n"
-        "❤️ 🧡 💛 💚 💙 💜 🖤 🤍 💗 💓 💞 💕\n"
-        "😀 😎 🤩 🥳 🤑 😍 🤗 👍 🙌 💪 🤝 ✌️ 👏 🫶\n"
-        "📱 💻 🖥️ 📷 📸 🎬 🎥 🎙️ 🔊 📣\n"
-        "🏠 🏢 🏪 🏦 ✈️ 🚗 🚌 🚀 🚂\n"
-        "📅 📆 ⏰ ⌚ 🕐 🕑 🕒 🕓 🕔 🕕\n"
-        "🔵 🟢 🔴 🟡 🟠 🟣 ⚪ ⚫",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="back_menu")]])
-    )
 
 
 # ── Настройки ─────────────────────────────────────────────────────────────────
@@ -1533,292 +1423,19 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ai_posts  = len([p for p in posts if p.get("source") == "ai"])
     ai_status = "✅ Настроен" if OPENROUTER_KEY else "❌ Не настроен (добавь OPENROUTER_KEY в .env)"
     await query.edit_message_text(
-        f"⚙️ *Настройки*\n\n"
-        f"📢 Канал: `{TARGET_CHANNEL}`\n"
-        f"👤 Admin ID: `{ADMIN_ID}`\n"
+        f"⚙️ <b>Настройки</b>\n\n"
+        f"📢 Канал: <code>{TARGET_CHANNEL}</code>\n"
+        f"👤 Admin ID: <code>{ADMIN_ID}</code>\n"
         f"🤖 OpenRouter: {ai_status}\n\n"
-        f"📊 *Статистика:*\n"
+        f"📊 <b>Статистика:</b>\n"
         f"📋 Всего постов: {total}\n"
         f"⏳ Ожидают публикации: {pending}\n"
         f"✅ Опубликовано: {published}\n"
         f"🤖 ИИ-вакансий: {ai_posts}",
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="back_menu")]])
     )
 
-
-# ── Планировщик задач ──────────────────────────────────────────────────────────
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  🤖 АВТОПИЛОТ
-# ══════════════════════════════════════════════════════════════════════════════
-
-AUTOPILOT_FILE = "autopilot.json"
-
-def load_autopilot() -> dict:
-    default = {
-        "enabled": False,
-        "times": ["08:00", "12:00", "20:00"],
-        "types": ["remote", "courier"],
-        "last_date": "",
-        "done_times": [],
-    }
-    try:
-        with open(AUTOPILOT_FILE, encoding="utf-8") as f:
-            d = json.load(f)
-            for k, v in default.items():
-                d.setdefault(k, v)
-            return d
-    except Exception:
-        return default
-
-def save_autopilot(cfg: dict):
-    with open(AUTOPILOT_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
-
-
-async def _upload_photo(bot, photo_path: str):
-    """Загружает фото через бота и возвращает file_id."""
-    try:
-        with open(photo_path, "rb") as f:
-            msg = await bot.send_photo(chat_id=ADMIN_ID, photo=f)
-            file_id = msg.photo[-1].file_id
-            await bot.delete_message(chat_id=ADMIN_ID, message_id=msg.message_id)
-            log.info(f"📸 Фото загружено: {photo_path} → {file_id[:20]}...")
-            return file_id
-    except Exception as e:
-        log.error(f"❌ Ошибка загрузки фото {photo_path}: {e}")
-        return None
-
-
-async def _autopilot_run(bot):
-    """Генерирует и публикует одну вакансию — вызывается планировщиком."""
-    import random as _r, pathlib as _pl
-
-    cfg_vac = load_vacancy_config()
-    ap      = load_autopilot()
-    vac_type = _r.choice(ap["types"])
-    vac_cfg  = cfg_vac.get(vac_type, DEFAULT_VACANCY_CONFIG[vac_type])
-
-    offer_list   = "\n".join(f"- {o}" for o in vac_cfg.get("offer", []))
-    req_list     = "\n".join(f"- {r}" for r in vac_cfg.get("requirements", []))
-    company_info = vac_cfg.get("company_info", "")
-    type_label   = "удалённую работу" if vac_type == "remote" else "курьера/доставщика"
-
-    salary_variants = vac_cfg.get("salary_variants", [{"label": "от 60 000 ₽", "hours": "полный день"}])
-    chosen_salary   = _r.choice(salary_variants)
-    links           = vac_cfg.get("links", [])
-    chosen_link     = _r.choice(links) if links else {"url": "", "label": "", "photo_dir": ""}
-
-    # Фото из папки оффера
-    photo_path = None
-    photo_dir_name = chosen_link.get("photo_dir", "")
-    if photo_dir_name:
-        pd = _pl.Path(photo_dir_name)
-        if pd.exists():
-            files = [f for f in pd.iterdir() if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")]
-            if files:
-                photo_path = str(_r.choice(files))
-
-    titles_remote = [
-        "Оператор колл-центра (удалённо)", "Менеджер по работе с клиентами / удалённо",
-        "Специалист поддержки (home office)", "Контент-менеджер на удалёнку",
-        "Оператор онлайн-чата / дистанционно", "Менеджер по продажам (удалённая работа)",
-        "Специалист по обработке заявок / remote", "Администратор онлайн-сервиса (удалённо)",
-        "Координатор клиентского сервиса (дистанционно)", "Оператор входящих обращений / удалённо",
-    ]
-    titles_courier = [
-        "Курьер-доставщик (пеший/вело)", "Водитель-курьер / доставка еды",
-        "Пеший курьер в службу доставки", "Курьер на велосипеде — ежедневные выплаты",
-        "Курьер последней мили", "Доставщик заказов (пешком/вело/авто)",
-        "Курьер в сервис доставки продуктов", "Курьер-исполнитель / гибкий график",
-    ]
-    company_remote = [
-        "Стабильная компания с распределённой командой по всей России.",
-        "Работаем в сфере дистанционного сервиса более 5 лет, команда — свыше 2 000 человек.",
-        "Федеральный работодатель, специализирующийся на удалённом обслуживании клиентов.",
-        "Компания с офисами в 15 городах и полностью удалённым штатом операторов.",
-        "Более 8 лет подбираем и развиваем удалённых специалистов по всей стране.",
-        "Крупный контакт-центр — более 4 000 сотрудников работают дистанционно.",
-        "Официальный работодатель, партнёр ведущих банков и торговых сетей страны.",
-        "Стабильный работодатель с многолетней историей и сотнями успешных сотрудников.",
-    ]
-    company_courier = [
-        "Один из крупнейших сервисов экспресс-доставки, работаем в 50+ городах России.",
-        "Федеральная служба доставки с ежедневным оборотом более 100 000 заказов.",
-        "Динамично растущая логистическая компания — более 12 000 активных курьеров.",
-        "Надёжный партнёр: стабильные заказы, быстрые выплаты, поддержка 24/7.",
-        "Сервис доставки с высоким рейтингом среди клиентов — ценим каждого в команде.",
-        "Работаем с ведущими ресторанами и магазинами города, заказов всегда много.",
-        "Логистический партнёр крупных торговых сетей и интернет-магазинов.",
-        "Компания, которая платит честно: ежедневные выплаты без задержек уже 6 лет.",
-    ]
-    призыв_list = [
-        "Откликайся прямо сейчас — ждём тебя в команде!",
-        "Подавай заявку сегодня и выходи на работу уже на этой неделе.",
-        "Присоединяйся — свободные места ограничены.",
-        "Жми кнопку ниже и начни зарабатывать уже завтра.",
-        "Не откладывай — оставь отклик и мы свяжемся в течение часа.",
-        "Актуальная вакансия, набор открыт прямо сейчас.",
-        "Твоя новая работа — в одном нажатии кнопки.",
-    ]
-
-    title   = _r.choice(titles_remote   if vac_type == "remote" else titles_courier)
-    company = _r.choice(company_remote  if vac_type == "remote" else company_courier)
-    призыв  = _r.choice(призыв_list)
-
-    prompt = (
-        f"Напиши реалистичный текст вакансии для Telegram-канала. Тип: {type_label}.\n\n"
-        "ПРАВИЛА:\n"
-        "- HTML-теги: <b>жирный</b>, <i>курсив</i>\n"
-        "- Эмодзи в начале каждого раздела\n"
-        f"- Название СТРОГО: {title}\n"
-        f"- О компании СТРОГО: {company}\n"
-        f"- Призыв в конце СТРОГО: {призыв}\n"
-        "- НЕ упоминай сайты поиска работы\n"
-        "- Каждый пункт перефразируй своими словами\n\n"
-        "Параметры:\n"
-        f"- Зарплата: {chosen_salary['label']} ({chosen_salary['hours']})\n"
-        f"- График: {vac_cfg.get('schedule', 'гибкий')}\n"
-        f"- Предлагаем: {offer_list}\n"
-        f"- Требования: {req_list}\n\n"
-        "Структура: заголовок → о компании → зарплата → график → предлагаем → требования → призыв.\n"
-        "Только текст поста, без пояснений."
-    )
-
-    try:
-        text = await call_openrouter(prompt)
-    except Exception as e:
-        log.error(f"Автопилот: ошибка OpenRouter: {e}")
-        return False
-
-    if not text:
-        log.error("Автопилот: пустой ответ от OpenRouter")
-        return False
-
-    photo_file_id = await _upload_photo(bot, photo_path) if photo_path else None
-    buttons = _make_vacancy_buttons(vac_type, vac_cfg, chosen_link)
-
-    post = {
-        "id":         new_id(),
-        "text":       text,
-        "photo":      photo_file_id,
-        "video":      None,
-        "buttons":    buttons,
-        "publish_at": "now",
-        "status":     "publishing",
-        "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
-        "source":     "autopilot",
-    }
-    posts = load_posts()
-    posts.append(post)
-    save_posts(posts)
-
-    ok = await send_post_to_channel(bot, post)
-    update_post(post["id"], {"status": "published" if ok else "failed"})
-    log.info(f"🤖 Автопилот: {'✅ опубликована' if ok else '❌ ошибка'} ({vac_type}, {chosen_salary['label']})")
-    return ok
-
-
-# ── Меню автопилота ────────────────────────────────────────────────────────────
-
-async def autopilot_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    ap = load_autopilot()
-    status   = "✅ Включён" if ap["enabled"] else "❌ Выключен"
-    times    = "  ".join(ap["times"])
-    types_lbl = {"remote": "только удалёнка", "courier": "только курьер"}
-    types_str = "удалёнка + курьер" if len(ap["types"]) == 2 else types_lbl.get(ap["types"][0], "?")
-    toggle_btn = "🔴 Выключить" if ap["enabled"] else "🟢 Включить"
-    await query.edit_message_text(
-        f"🤖 *Автопилот вакансий*\n\n"
-        f"Статус: {status}\n"
-        f"🕐 Расписание: `{times}`\n"
-        f"📋 Тип: {types_str}\n\n"
-        "Бот сам генерирует и публикует вакансии каждый день без твоего участия.",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(toggle_btn, callback_data="ap_toggle")],
-            [InlineKeyboardButton("🕐 Изменить время",  callback_data="ap_set_times")],
-            [InlineKeyboardButton("📋 Изменить тип",   callback_data="ap_set_types")],
-            [InlineKeyboardButton("← Назад",           callback_data="back_menu")],
-        ])
-    )
-
-async def ap_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    ap = load_autopilot()
-    ap["enabled"] = not ap["enabled"]
-    save_autopilot(ap)
-    await autopilot_menu(update, context)
-
-async def ap_set_types(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    ap = load_autopilot()
-    cur = ap["types"]
-    def mark(val):
-        return "✅ " if cur == val else ""
-    await query.edit_message_text(
-        "📋 *Какие вакансии публиковать?*",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{mark(['remote','courier'])}Удалёнка + Курьер", callback_data="aptype_both")],
-            [InlineKeyboardButton(f"{mark(['remote'])}Только удалённая",            callback_data="aptype_remote")],
-            [InlineKeyboardButton(f"{mark(['courier'])}Только курьер",              callback_data="aptype_courier")],
-            [InlineKeyboardButton("← Назад", callback_data="ap_menu")],
-        ])
-    )
-
-async def ap_set_type_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    ap = load_autopilot()
-    ap["types"] = {"aptype_both": ["remote","courier"], "aptype_remote": ["remote"], "aptype_courier": ["courier"]}.get(query.data, ["remote","courier"])
-    save_autopilot(ap)
-    await autopilot_menu(update, context)
-
-AP_WAIT_TIMES = 50
-
-async def ap_set_times(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    ap = load_autopilot()
-    times = "  ".join(ap["times"])
-    await query.edit_message_text(
-        f"🕐 *Расписание автопилота*\n\n"
-        f"Текущее: `{times}`\n\n"
-        "Отправь новое время через пробел:\n"
-        "Пример: `08:00 12:00 20:00`",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Оставить текущее", callback_data="ap_menu")]])
-    )
-    return AP_WAIT_TIMES
-
-async def ap_got_times(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    import re as _re
-    times = sorted(set(_re.findall(r'\d{1,2}:\d{2}', update.message.text)))
-    valid = []
-    for t in times:
-        try:
-            datetime.strptime(t, "%H:%M")
-            valid.append(t.zfill(5))
-        except ValueError:
-            pass
-    if not valid:
-        await update.message.reply_text("❌ Не распознал. Пример: `08:00 12:00 20:00`", parse_mode=ParseMode.MARKDOWN)
-        return AP_WAIT_TIMES
-    ap = load_autopilot()
-    ap["times"] = valid
-    save_autopilot(ap)
-    await update.message.reply_text(
-        f"✅ Расписание: `{'  '.join(valid)}`",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_menu_kb()
-    )
-    return ConversationHandler.END
 
 async def scheduler_loop(bot: Bot):
     log.info("⏰ Планировщик запущен — проверка каждые 30 сек")
@@ -1854,33 +1471,7 @@ async def scheduler_loop(bot: Bot):
             if changed:
                 save_posts(posts)
 
-            # Автопилот
-            ap = load_autopilot()
-            if ap.get("enabled"):
-                if ap.get("last_date") != today:
-                    ap["last_date"]  = today
-                    ap["done_times"] = []
-                    save_autopilot(ap)
-                for slot in ap.get("times", []):
-                    if slot <= now_time and slot not in ap.get("done_times", []):
-                        # Если слот уже прошёл больше чем на 5 минут — пропускаем
-                        # (защита от массовой отправки при первом включении)
-                        try:
-                            slot_dt = datetime.strptime(f"{today} {slot}", "%d.%m.%Y %H:%M")
-                            minutes_late = (now_dt - slot_dt).total_seconds() / 60
-                            if minutes_late > 5:
-                                log.info(f"🤖 Автопилот: слот {slot} пропущен (опоздание {int(minutes_late)} мин)")
-                                ap = load_autopilot()
-                                ap["done_times"] = ap.get("done_times", []) + [slot]
-                                save_autopilot(ap)
-                                continue
-                        except Exception:
-                            pass
-                        log.info(f"🤖 Автопилот: слот {slot}")
-                        ok = await _autopilot_run(bot)
-                        ap = load_autopilot()
-                        ap["done_times"] = ap.get("done_times", []) + [slot]
-                        save_autopilot(ap)
+
 
         except Exception as e:
             log.error(f"Ошибка планировщика: {e}")
@@ -1906,7 +1497,10 @@ async def run():
 
     # ── Создание поста
     app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(create_post_start, pattern="^create_post$")],
+        entry_points=[
+            CallbackQueryHandler(create_post_start, pattern="^create_post$"),
+            MessageHandler(filters.Regex("^✏️ Создать пост$"), create_post_start)
+        ],
         states={
             WAIT_TEXT    : [MessageHandler(filters.TEXT, got_text)],
             WAIT_MEDIA   : [
@@ -1926,7 +1520,10 @@ async def run():
                 CallbackQueryHandler(got_repeat_cb, pattern="^repeat_skip$"),
             ],
         },
-        fallbacks=[CommandHandler("menu", menu_cmd)],
+        fallbacks=[
+            CommandHandler("menu", menu_cmd),
+            CallbackQueryHandler(back_menu, pattern="^back_menu$")
+        ],
         per_message=False,
     ))
 
@@ -1964,62 +1561,24 @@ async def run():
         per_message=False,
     ))
 
-    # ── Редактирование ссылок вакансий
-    app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(vedit_links_start, pattern="^vedit_links_")],
-        states={
-            VEDIT_WAIT_LINK_MAIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, vedit_got_link_main)],
-            VEDIT_WAIT_LINK_ALT : [MessageHandler(filters.TEXT, vedit_got_link_alt)],
-        },
-        fallbacks=[CommandHandler("menu", menu_cmd)],
-        per_message=False,
-    ))
+    app.add_handler(CallbackQueryHandler(reschedule_post_start,     pattern="^reschedule_"))
+    app.add_handler(CallbackQueryHandler(reschedule_post_done,      pattern="^sched_"))
+    
+    app.add_handler(MessageHandler(filters.Regex("^🤖 ИИ-вакансия$"), ai_vacancy_menu))
+    app.add_handler(MessageHandler(filters.Regex("^🤖 Сгенерировать пост$"), ai_vacancy_menu))
+    app.add_handler(MessageHandler(filters.Regex("^📝 Мои посты$"), edit_list))
+    app.add_handler(MessageHandler(filters.Regex("^📋 Список постов$"), edit_list))
+    app.add_handler(MessageHandler(filters.Regex("^⚙️ Настройки$"), settings))
+    app.add_handler(MessageHandler(filters.Regex("^❓ Помощь$"), help_menu))
 
-    # ── Редактирование зарплаты
-    app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(vedit_salary_start, pattern="^vedit_salary_")],
-        states={
-            VEDIT_WAIT_SALARY: [MessageHandler(filters.TEXT & ~filters.COMMAND, vedit_got_salary)],
-        },
-        fallbacks=[CommandHandler("menu", menu_cmd)],
-        per_message=False,
-    ))
-
-    # ── Редактирование графика
-    app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(vedit_sched_start, pattern="^vedit_sched_")],
-        states={
-            VEDIT_WAIT_SCHED: [MessageHandler(filters.TEXT & ~filters.COMMAND, vedit_got_sched)],
-        },
-        fallbacks=[CommandHandler("menu", menu_cmd)],
-        per_message=False,
-    ))
-
-    # ── Остальные обработчики
-    # ── Автопилот
-    app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(ap_set_times, pattern="^ap_set_times$")],
-        states={AP_WAIT_TIMES: [MessageHandler(filters.TEXT & ~filters.COMMAND, ap_got_times)]},
-        fallbacks=[CommandHandler("menu", menu_cmd)],
-        per_message=False,
-    ))
-    app.add_handler(CallbackQueryHandler(autopilot_menu,  pattern="^ap_menu$"))
-    app.add_handler(CallbackQueryHandler(ap_toggle,       pattern="^ap_toggle$"))
-    app.add_handler(CallbackQueryHandler(ap_set_types,    pattern="^ap_set_types$"))
-    app.add_handler(CallbackQueryHandler(ap_set_type_cb,  pattern="^aptype_"))
     app.add_handler(CallbackQueryHandler(ai_gen_quick,    pattern="^ai_gen_quick_remote$"))
     app.add_handler(CallbackQueryHandler(ai_vacancy_menu,        pattern="^ai_vacancy_menu$"))
-    app.add_handler(CallbackQueryHandler(vacancy_settings_menu,  pattern="^vacancy_settings_menu$"))
-    app.add_handler(CallbackQueryHandler(vacancy_settings_type,  pattern="^vsett_"))
     app.add_handler(CallbackQueryHandler(ai_pub_now_handler,     pattern="^ai_pub_now$"))
     app.add_handler(CallbackQueryHandler(ai_pub_schedule_handler,pattern="^ai_pub_schedule$"))
     app.add_handler(CallbackQueryHandler(ai_scheduled_time,      pattern="^sched_"))
     app.add_handler(CallbackQueryHandler(ai_regenerate,          pattern="^ai_regenerate$"))
-    app.add_handler(CallbackQueryHandler(content_plan,           pattern="^content_plan$"))
     app.add_handler(CallbackQueryHandler(edit_list,              pattern="^edit_list$"))
     app.add_handler(CallbackQueryHandler(settings,               pattern="^settings$"))
-    app.add_handler(CallbackQueryHandler(show_templates,         pattern="^templates$"))
-    app.add_handler(CallbackQueryHandler(emoji_catalog,          pattern="^emoji_cat$"))
     app.add_handler(CallbackQueryHandler(help_menu,              pattern="^help_menu$"))
     app.add_handler(CallbackQueryHandler(back_menu,              pattern="^back_menu$"))
     app.add_handler(CallbackQueryHandler(view_post,              pattern="^post_"))
@@ -2027,7 +1586,6 @@ async def run():
     app.add_handler(CallbackQueryHandler(dup_post,               pattern="^dup_"))
     app.add_handler(CallbackQueryHandler(del_confirm,            pattern="^del_confirm_"))
     app.add_handler(CallbackQueryHandler(del_post,               pattern="^del_"))
-    app.add_handler(CallbackQueryHandler(use_template,           pattern="^tpl_"))
 
     log.info("🤖 Content Manager Bot v6.0 запускается...")
     log.info(f"📢 Канал: {TARGET_CHANNEL} | Admin: {ADMIN_ID}")
