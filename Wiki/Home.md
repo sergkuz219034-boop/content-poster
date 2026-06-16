@@ -1,19 +1,20 @@
 # Wiki Content Manager Bot
 
-Карта системы для быстрого входа в проект. Источник истины: `bot.py`, state-файлы и `bot.log`.
+Legacy home page проекта.
 
-## Что это
+## Канонический вход
 
-- Telegram-бот для публикации постов в канал.
-- Админ-панель реализована как Telegram-меню, а не отдельный web UI.
-- Хранение состояния файловое, без БД.
+- [[README]]
+- [[START_HERE]]
+- [[Index]]
+- [[01 Проекты/Content Poster/README]]
 
-## Навигация
+## Legacy страницы
 
+- [[AI Assistant]]
+- [[Configuration]]
+- [[Posts and Formatting]]
 - [[01 Расследования/2026-06-15 Админ-панель падает из-за отсутствующего persistence слоя]]
 - [[01 Расследования/2026-06-16 Menu fallback и admin balance auto-create]]
 - [[02 Архитектура/Бот и состояние]]
 - [[04 Сущности/Файлы состояния]]
-- [[Posts and Formatting]]
-- [[AI Assistant]]
-- [[Configuration]]
