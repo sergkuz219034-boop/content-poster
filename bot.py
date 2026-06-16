@@ -32,6 +32,34 @@ TARGET_CHANNEL   = os.getenv("TARGET_CHANNEL", "")
 OPENROUTER_KEY   = os.getenv("OPENROUTER_KEY", "")
 POSTS_FILE       = "posts.json"
 VACANCY_CFG_FILE = "vacancy_config.json"
+USERS_FILE       = "users.json"
+BILLING_CFG_FILE = "billing_config.json"
+SYSTEM_PROMPT_FILE = "system_prompt.txt"
+
+DEFAULT_BILLING_CONFIG = {"markup": 30.0}
+DEFAULT_SYSTEM_PROMPT = """Напиши реалистичный текст вакансии для Telegram-канала в стиле hh.ru и SuperJob. Тип: {type_label}.
+
+Параметры вакансии:
+- Зарплата: {chosen_salary_label} ({chosen_salary_hours})
+- График: {schedule}
+- О компании: {company_info}
+- Что мы предлагаем:
+{offer_list}
+- Требования:
+{req_list}
+- Дополнительно:
+{extra}
+
+Структура поста:
+1. <b>Название должности</b>
+2. 🏢 <b>О компании</b>
+3. 💰 <b>Зарплата</b>
+4. 🕐 <b>График работы</b>
+5. ✅ <b>Мы предлагаем</b>
+6. 📋 <b>Требования</b>
+7. 📩 Короткий призыв откликнуться
+
+Пиши только текст поста, никаких пояснений."""
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,8 +80,8 @@ log = logging.getLogger(__name__)
     # ИИ-вакансии
     AI_WAIT_SALARY_MIN, AI_WAIT_SALARY_MAX,
     AI_WAIT_SCHEDULE_INFO, AI_WAIT_OFFER, AI_WAIT_REQUIREMENTS,
-    AI_WAIT_EXTRA, AI_WAIT_PREVIEW_ACTION, AI_WAIT_EDIT_TEXT,
-) = range(17)
+    AI_WAIT_EXTRA, AI_WAIT_PREVIEW_ACTION, AI_WAIT_EDIT_TEXT, AI_WAIT_CUSTOM_TOPIC,
+) = range(18)
 
 
 # ── Конфиг вакансий ───────────────────────────────────────────────────────────
@@ -128,6 +156,67 @@ def save_vacancy_config(cfg: dict):
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 
+def _read_json_file(path: str, default):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(default, dict) and not isinstance(data, dict):
+                return default.copy()
+            if isinstance(default, list) and not isinstance(data, list):
+                return default.copy()
+            return data
+    except Exception:
+        return default.copy() if isinstance(default, (dict, list)) else default
+
+
+def _write_json_file(path: str, payload):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def load_billing_config() -> dict:
+    return _read_json_file(BILLING_CFG_FILE, DEFAULT_BILLING_CONFIG)
+
+
+def save_billing_config(cfg: dict):
+    _write_json_file(BILLING_CFG_FILE, cfg)
+
+
+def load_users_db() -> dict:
+    return _read_json_file(USERS_FILE, {})
+
+
+def save_users_db(db: dict):
+    _write_json_file(USERS_FILE, db)
+
+
+def get_or_create_user(user_id: int | str) -> dict:
+    db = load_users_db()
+    key = str(user_id)
+    if key not in db:
+        db[key] = {
+            "balance": 0.0,
+            "total_generations": 0,
+            "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
+        }
+        save_users_db(db)
+    return db[key]
+
+
+def load_system_prompt() -> str:
+    try:
+        with open(SYSTEM_PROMPT_FILE, encoding="utf-8") as f:
+            prompt = f.read().strip()
+            return prompt or DEFAULT_SYSTEM_PROMPT
+    except Exception:
+        return DEFAULT_SYSTEM_PROMPT
+
+
+def save_system_prompt(prompt: str):
+    with open(SYSTEM_PROMPT_FILE, "w", encoding="utf-8") as f:
+        f.write(prompt.strip())
+
+
 # ── Хранилище постов ──────────────────────────────────────────────────────────
 
 def load_posts() -> list:
@@ -157,6 +246,29 @@ def delete_post_by_id(post_id: str):
 def new_id() -> str:
     return str(uuid.uuid4())[:8]
 
+MENU_REGEX = "^(✏️ Создать пост|🤖 Сгенерировать пост|📝 Мои посты|📋 Список постов|⚙️ Настройки|❓ Помощь|🤖 ИИ-вакансия|👑 Админ-панель|👤 Мой профиль)$"
+
+async def menu_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    context.user_data.clear()
+    if text == "✏️ Создать пост":
+        return await create_post_start(update, context)
+    elif text in ["🤖 Сгенерировать пост", "🤖 ИИ-вакансия"]:
+        await ai_vacancy_menu(update, context)
+    elif text in ["📝 Мои посты", "📋 Список постов"]:
+        await edit_list(update, context)
+    elif text == "⚙️ Настройки":
+        await settings(update, context)
+    elif text == "❓ Помощь":
+        await help_menu(update, context)
+    elif text == "👤 Мой профиль":
+        await user_profile(update, context)
+
+    elif text == "👑 Админ-панель":
+        await admin_panel(update, context)
+    return ConversationHandler.END
+
+
 
 # ── Проверка доступа ──────────────────────────────────────────────────────────
 
@@ -165,14 +277,188 @@ def is_admin(update: Update) -> bool:
     return user is not None and user.id == ADMIN_ID
 
 
+def is_super_admin(update: Update) -> bool:
+    return is_admin(update)
+
+
 # ── Главное меню ──────────────────────────────────────────────────────────────
 
-def main_reply_kb():
-    return ReplyKeyboardMarkup([
-        ["✏️ Создать пост", "🤖 Сгенерировать пост"],
-        ["📝 Мои посты", "⚙️ Настройки"],
+def main_reply_kb(user_id=None):
+    kb = [
+                ["🤖 Сгенерировать пост"],
+        ["✏️ Создать пост", "📝 Мои посты"],
+        ["👤 Мой профиль", "⚙️ Настройки"],
         ["❓ Помощь"]
-    ], resize_keyboard=True)
+    ]
+    if user_id == ADMIN_ID:
+        kb.append(["👑 Админ-панель"])
+    return ReplyKeyboardMarkup(kb, resize_keyboard=True)
+
+
+
+# ── Админ Панель ─────────────────────────────────────────────────────────────
+ADMIN_WAIT_USER_ID, ADMIN_WAIT_PROMPT = range(18, 20)
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_super_admin(update):
+        return
+    query = update.callback_query
+    if query:
+        await query.answer()
+        send = query.edit_message_text
+    else:
+        send = update.message.reply_text
+
+    await send(
+        "👑 <b>Админ-панель</b>\n\nЗдесь можно управлять доступом и настройками нейросети.",
+        parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("👥 Пользователи (Баланс)", callback_data="admin_users")],
+            [InlineKeyboardButton("💵 Настройки цен (Наценка)", callback_data="admin_billing")],
+            [InlineKeyboardButton("🧠 Системный промт", callback_data="admin_prompt")],
+            [InlineKeyboardButton("← Назад", callback_data="back_menu")]
+        ])
+    )
+
+
+ADMIN_WAIT_MARKUP, ADMIN_WAIT_BALANCE_USER, ADMIN_WAIT_BALANCE_AMOUNT = range(20, 23)
+
+async def admin_billing(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    cfg = load_billing_config()
+    markup = cfg.get("markup", 30.0)
+    await query.edit_message_text(
+        f"💵 <b>Настройки цен</b>\n\n"
+        f"Текущая стоимость 1 генерации (наценка): <b>{markup} руб.</b>\n\n"
+        f"<i>При каждой генерации с баланса пользователя будет списываться эта сумма.</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ Изменить стоимость", callback_data="admin_edit_markup")],
+            [InlineKeyboardButton("← Назад", callback_data="admin_panel")]
+        ])
+    )
+
+async def admin_edit_markup_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "✏️ Введите новую стоимость генерации (число в рублях, например 25):",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Отмена", callback_data="admin_billing")]])
+    )
+    return ADMIN_WAIT_MARKUP
+
+async def admin_edit_markup_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        val = float(update.message.text.strip())
+        if val <= 0:
+            raise ValueError
+        cfg = load_billing_config()
+        cfg["markup"] = val
+        save_billing_config(cfg)
+        await update.message.reply_text(f"✅ Стоимость генерации установлена на: {val} руб.", reply_markup=main_reply_kb(update.effective_user.id))
+    except ValueError:
+        await update.message.reply_text("❌ Ошибка. Введите положительное число, например `25`.", parse_mode=ParseMode.MARKDOWN)
+        return ADMIN_WAIT_MARKUP
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    db = load_users_db()
+    text = "👥 <b>Список пользователей и их балансы:</b>\n\n"
+    if not db:
+        text += "<i>Пока никого нет.</i>"
+    else:
+        for uid, data in db.items():
+            text += f"- <code>{uid}</code> | Баланс: {data.get('balance', 0)} руб.\n"
+    
+    kb = [
+        [InlineKeyboardButton("💰 Пополнить/Списать баланс", callback_data="admin_add_balance_start")],
+        [InlineKeyboardButton("← Назад", callback_data="admin_panel")]
+    ]
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
+
+async def admin_add_balance_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "💰 <b>Изменение баланса</b>\n\nОтправь ID пользователя, которому нужно изменить баланс:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Отмена", callback_data="admin_users")]])
+    )
+    return ADMIN_WAIT_BALANCE_USER
+
+async def admin_add_balance_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.text.strip()
+    if not user_id.isdigit():
+        await update.message.reply_text("❌ Введи числовой Telegram ID пользователя.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="admin_users")]]))
+        return ADMIN_WAIT_BALANCE_USER
+
+    get_or_create_user(user_id)
+    db = load_users_db()
+    context.user_data["edit_balance_user"] = user_id
+    await update.message.reply_text(
+        f"Пользователь <code>{user_id}</code>. Текущий баланс: {db[user_id].get('balance', 0)} руб.\n\n"
+        f"Отправь сумму для пополнения (можно с минусом для списания):",
+        parse_mode=ParseMode.HTML
+    )
+    return ADMIN_WAIT_BALANCE_AMOUNT
+
+async def admin_add_balance_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount = float(update.message.text.strip())
+        user_id = context.user_data.get("edit_balance_user")
+        if not user_id:
+            await update.message.reply_text("❌ Не выбран пользователь.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="admin_users")]]))
+            return ConversationHandler.END
+        db = load_users_db()
+        if user_id not in db:
+            db[user_id] = get_or_create_user(user_id)
+        db[user_id]["balance"] = float(db[user_id].get("balance", 0.0)) + amount
+        save_users_db(db)
+        await update.message.reply_text(f"✅ Баланс пользователя {user_id} изменен на {amount} руб. Текущий баланс: {db[user_id]['balance']} руб.", reply_markup=main_reply_kb(update.effective_user.id))
+    except ValueError:
+        await update.message.reply_text("❌ Ошибка. Введите число.", reply_markup=main_reply_kb(update.effective_user.id))
+        return ADMIN_WAIT_BALANCE_AMOUNT
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    prompt = load_system_prompt()
+    preview = prompt[:800] + ("..." if len(prompt) > 800 else "")
+    await query.edit_message_text(
+        f"🧠 <b>Системный промт</b>\n\nТекущий промт:\n<code>{preview}</code>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ Изменить промт", callback_data="admin_edit_prompt")],
+            [InlineKeyboardButton("← Назад", callback_data="admin_panel")]
+        ])
+    )
+
+async def admin_edit_prompt_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "✏️ <b>Изменение промта</b>\n\nОтправь новый текст системного промта. Используй переменные: {type_label}, {chosen_salary_label}, {chosen_salary_hours}, {schedule}, {company_info}, {offer_list}, {req_list}, {extra}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Отмена", callback_data="admin_prompt")]])
+    )
+    return ADMIN_WAIT_PROMPT
+
+async def admin_edit_prompt_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    new_prompt = update.message.text.strip()
+    if not new_prompt:
+        await update.message.reply_text("❌ Промт не может быть пустым.")
+        return ADMIN_WAIT_PROMPT
+    save_system_prompt(new_prompt)
+    await update.message.reply_text("✅ Промт успешно обновлен!", reply_markup=main_reply_kb(update.effective_user.id))
+    context.user_data.clear()
+    return ConversationHandler.END
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -185,14 +471,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📢 Канал: " + TARGET_CHANNEL + "\n\n"
         "🤖 Новинка: ИИ-генерация вакансий через OpenRouter!\n\n"
         "Выбери действие:",
-        reply_markup=main_reply_kb()
+        reply_markup=main_reply_kb(update.effective_user.id)
     )
 
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
     context.user_data.clear()
-    await update.message.reply_text("📌 Главное меню:", reply_markup=main_reply_kb())
+    await update.message.reply_text("📌 Главное меню:", reply_markup=main_reply_kb(update.effective_user.id))
 
 async def back_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -203,7 +489,7 @@ async def back_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.delete()
     except Exception:
         pass
-    await context.bot.send_message(query.message.chat_id, "📌 Главное меню:", reply_markup=main_reply_kb())
+    await context.bot.send_message(query.message.chat_id, "📌 Главное меню:", reply_markup=main_reply_kb(update.effective_user.id))
     return ConversationHandler.END
 
 
@@ -221,12 +507,13 @@ async def ai_vacancy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         send = update.message.reply_text
 
     await send(
-        "🤖 *ИИ-генерация вакансии*\n\n"
-        "Выбери тип вакансии — ИИ напишет текст, ты его одобришь перед публикацией:",
+        "🤖 *Генерация поста*\n\n"
+        "Выбери тип — ИИ напишет текст, ты его одобришь перед публикацией:",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🏠 Удалённая работа",     callback_data="ai_gen_remote")],
             [InlineKeyboardButton("🚴 Курьер / Доставщик",   callback_data="ai_gen_courier")],
+            [InlineKeyboardButton("✍️ Своя тематика",         callback_data="ai_gen_custom_start")],
             [InlineKeyboardButton("⚡ Быстрая генерация",     callback_data="ai_gen_quick_remote")],
             [InlineKeyboardButton("← Назад",                  callback_data="back_menu")],
         ])
@@ -260,6 +547,33 @@ async def ai_gen_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text("⏳ Генерирую вакансию, подожди секунду...")
     await _do_generate(query.message, context, edit=True)
+
+
+async def ai_gen_custom_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "✍️ <b>Своя тематика</b>\n\nВведи тематику поста (например: <i>Кассир в Пятёрочку, Сборщик заказов</i>):",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="ai_vacancy_menu")]])
+    )
+    return AI_WAIT_CUSTOM_TOPIC
+
+async def ai_got_custom_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic = update.message.text.strip()
+    context.user_data["ai_vac"] = {
+        "type": "custom",
+        "custom_topic": topic,
+        "schedule": "По договорённости",
+        "company_info": "",
+        "salary_variants": [{"label": "По результатам собеседования", "hours": "", "min": 0}],
+        "offer": ["Официальное трудоустройство", "Стабильные выплаты"],
+        "requirements": ["Ответственность", "Пунктуальность"],
+        "links": []
+    }
+    await update.message.reply_text("⏳ Генерирую вакансию по твоей тематике, подожди секунду...")
+    await _do_generate(update.message, context)
+    return ConversationHandler.END
 
 async def ai_got_salary_min(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().replace(" ", "").replace(",", "")
@@ -360,7 +674,7 @@ async def _do_generate(msg, context: ContextTypes.DEFAULT_TYPE, edit=False):
     """Вызов OpenRouter API и показ предпросмотра."""
     vac = context.user_data.get("ai_vac", {})
     vac_type = vac.get("type", "remote")
-    type_label = "удалённую работу" if vac_type == "remote" else "курьера/доставщика"
+    type_label = vac.get("custom_topic", "свободную тематику") if vac_type == "custom" else ("удалённую работу" if vac_type == "remote" else "курьера/доставщика")
 
     offer_list = "\n".join(f"- {o}" for o in vac.get("offer", []))
     req_list   = "\n".join(f"- {r}" for r in vac.get("requirements", []))
@@ -392,44 +706,51 @@ async def _do_generate(msg, context: ContextTypes.DEFAULT_TYPE, edit=False):
     context.user_data["ai_photo_path"] = photo_path
     log.info(f"📸 Выбрано фото: {photo_path or 'нет'} (папка: {_pdir})")
 
-    prompt = f"""Напиши реалистичный текст вакансии для Telegram-канала в стиле hh.ru и SuperJob. Тип: {type_label}.
+    base_prompt = load_system_prompt()
+    extra_str = "- Дополнительно: " + extra if extra else ""
+    try:
+        prompt = base_prompt.format(
+            type_label=type_label,
+            chosen_salary_label=chosen_salary["label"],
+            chosen_salary_hours=chosen_salary["hours"],
+            schedule=vac.get("schedule", "гибкий"),
+            company_info=company_info,
+            offer_list=offer_list,
+            req_list=req_list,
+            extra=extra_str
+        )
+    except Exception as e:
+        log.error(f"Error formatting prompt: {e}")
+        prompt = base_prompt # fallback
 
-ВАЖНЫЕ ПРАВИЛА:
-- Используй HTML-теги: <b>жирный</b>, <i>курсив</i>
-- Эмодзи в начале каждого раздела
-- Название должно быть РЕАЛЬНЫМ и конкретным, как на hh.ru.
-  Примеры для удалёнки: "Оператор колл-центра (удалённо)", "Менеджер по работе с клиентами / удалённо", "Специалист поддержки (home office)", "Контент-менеджер на удалёнку", "Оператор чата / дистанционно".
-  Примеры для курьера: "Курьер-доставщик (пеший/вело)", "Водитель-курьер / доставка еды", "Курьер на личном авто — ежедневные выплаты", "Пеший курьер в службу доставки".
-  НЕ ПРИДУМЫВАЙ фантазийных названий типа "Волшебник", "Герой", "Мечта" и т.п.
-- Каждый раз пиши УНИКАЛЬНЫЙ текст — меняй формулировки, порядок акцентов, стиль призыва
-- Смысл и факты остаются теми же, но слова, структура предложений и тон должны быть разными
-- Варьируй: длину предложений, эмодзи (но не меняй сами разделы), порядок пунктов в списках
-- Текст должен звучать как реальная вакансия от HR-отдела, не как реклама
-- Пиши конкретно, без воды
-
-Параметры вакансии:
-- Зарплата: {chosen_salary["label"]} ({chosen_salary["hours"]})
-- График: {vac.get("schedule", "гибкий")}
-- О компании: {company_info}
-- Что мы предлагаем:
-{offer_list}
-- Требования:
-{req_list}
-{"- Дополнительно: " + extra if extra else ""}
-
-Структура поста (строго соблюдай):
-1. <b>Название должности</b> — жирный заголовок с эмодзи, конкретное и реальное
-2. 🏢 <b>О компании</b> — 1-2 предложения (используй данные из "О компании" выше)
-3. 💰 <b>Зарплата</b> — точно как в параметрах: {chosen_salary["label"]} за {chosen_salary["hours"]}. Не добавляй слова "на руки" — только то что указано.
-4. 🕐 <b>График работы</b>
-5. ✅ <b>Мы предлагаем</b> — список через дефис
-6. 📋 <b>Требования</b> — список через дефис
-7. 📩 Короткий уникальный призыв откликнуться (без ссылок — кнопка будет отдельно)
-
-Пиши только текст поста, никаких пояснений."""
+    user_id = msg.from_user.id
+    user_data_db = get_or_create_user(user_id)
+    cfg_bill = load_billing_config()
+    cost = cfg_bill.get("markup", 30.0)
+    
+    if user_id != ADMIN_ID:
+        if user_data_db.get("balance", 0.0) < cost:
+            err_msg = (
+                f"❌ <b>Недостаточно средств!</b>\n\n"
+                f"Стоимость генерации: {cost} руб.\n"
+                f"Твой баланс: {user_data_db.get('balance', 0.0):.2f} руб.\n\n"
+                f"Пожалуйста, пополни баланс через администратора."
+            )
+            if edit:
+                await msg.edit_text(err_msg, parse_mode=ParseMode.HTML)
+            else:
+                await msg.reply_text(err_msg, parse_mode=ParseMode.HTML)
+            return
 
     try:
         generated_text = await call_openrouter(prompt)
+        # Deduct balance on success
+        if user_id != ADMIN_ID and generated_text:
+            db = load_users_db()
+            db[str(user_id)]["balance"] -= cost
+            db[str(user_id)]["total_generations"] = db[str(user_id)].get("total_generations", 0) + 1
+            save_users_db(db)
+
     except Exception as e:
         log.error(f"OpenRouter error: {e}")
         generated_text = None
@@ -508,7 +829,7 @@ async def ai_pub_now_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     vac_type    = context.user_data.get("ai_vac_type", "remote")
     text        = context.user_data.get("ai_generated_text", "")
-    cfg         = load_vacancy_config().get(vac_type, DEFAULT_VACANCY_CONFIG[vac_type])
+    cfg = load_vacancy_config().get(vac_type, DEFAULT_VACANCY_CONFIG.get(vac_type, {}))
     chosen_link = context.user_data.get("ai_chosen_link", None)
     photo_path  = context.user_data.get("ai_photo_path", None)
 
@@ -541,7 +862,7 @@ async def ai_pub_now_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.message.delete()
     except:
         pass
-    await context.bot.send_message(query.message.chat_id, result, reply_markup=main_reply_kb())
+    await context.bot.send_message(query.message.chat_id, result, reply_markup=main_reply_kb(update.effective_user.id))
     context.user_data.clear()
 
 
@@ -567,7 +888,7 @@ async def ai_scheduled_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     vac_type    = context.user_data.get("ai_vac_type", "remote")
     text        = context.user_data.get("ai_generated_text", "")
-    cfg         = load_vacancy_config().get(vac_type, DEFAULT_VACANCY_CONFIG[vac_type])
+    cfg = load_vacancy_config().get(vac_type, DEFAULT_VACANCY_CONFIG.get(vac_type, {}))
     chosen_link = context.user_data.get("ai_chosen_link", None)
     buttons     = _make_vacancy_buttons(vac_type, cfg, chosen_link)
 
@@ -593,7 +914,7 @@ async def ai_scheduled_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         f"✅ Вакансия запланирована!\n📅 Дата: `{dt_str}`\n🆔 ID: `{post['id']}`",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_reply_kb()
+        reply_markup=main_reply_kb(update.effective_user.id)
     )
     context.user_data.clear()
 
@@ -611,10 +932,9 @@ async def ai_edit_text_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     current = context.user_data.get("ai_generated_text", "")
-    preview = current[:300] + ("..." if len(current) > 300 else "")
     await query.edit_message_text(
         "✏️ <b>Редактирование вакансии</b>\n\n"
-        f"Текущий текст (начало):\n<i>{preview}</i>\n\n"
+        f"Текущий текст:\n<i>{current}</i>\n\n"
         "Отправь новый текст вакансии целиком:",
         parse_mode=ParseMode.HTML
     )
@@ -659,6 +979,21 @@ def _make_vacancy_buttons(vac_type: str, cfg: dict, chosen_link: dict = None) ->
 
 
 # ── Помощь ────────────────────────────────────────────────────────────────────
+
+
+async def user_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_data = get_or_create_user(user_id)
+    balance = user_data.get("balance", 0.0)
+    total_gen = user_data.get("total_generations", 0)
+    
+    text = (
+        f"👤 <b>Мой профиль</b>\n\n"
+        f"💰 <b>Баланс:</b> {balance:.2f} руб.\n"
+        f"📈 <b>Всего генераций:</b> {total_gen}\n\n"
+        f"ℹ️ <i>Чтобы пополнить баланс, напишите администратору.</i>"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1000,7 +1335,7 @@ async def finish_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         _post_saved_msg(post),
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_reply_kb()
+        reply_markup=main_reply_kb(update.effective_user.id)
     )
     if post["status"] == "publishing":
         ok = await send_post_to_channel(context.bot, post)
@@ -1014,7 +1349,7 @@ async def finish_post_query(query, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         _post_saved_msg(post),
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_reply_kb()
+        reply_markup=main_reply_kb(query.from_user.id)
     )
     if post["status"] == "publishing":
         ok = await send_post_to_channel(context.bot, post)
@@ -1177,7 +1512,7 @@ async def edit_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )])
     buttons.append([InlineKeyboardButton("← Назад", callback_data="back_menu")])
     await send(
-        "📝 *Все посты:* (🤖 = ИИ-вакансия)",
+        "📝 *Все посты:* (🤖 = Сгенерированный)",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup(buttons)
     )
@@ -1319,7 +1654,7 @@ async def reschedule_post_done(update: Update, context: ContextTypes.DEFAULT_TYP
             await query.message.delete()
         except:
             pass
-        await context.bot.send_message(query.message.chat_id, "❌ Ошибка: пост не найден.", reply_markup=main_reply_kb())
+        await context.bot.send_message(query.message.chat_id, "❌ Ошибка: пост не найден.", reply_markup=main_reply_kb(update.effective_user.id))
         return
 
     dt_str = query.data.replace("sched_", "")
@@ -1353,16 +1688,17 @@ async def edit_text_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     post_id = query.data.replace("edittext_", "")
     context.user_data["editing_id"] = post_id
     post = get_post(post_id)
-    current = post.get("text","")[:100] if post else ""
+    current = post.get("text","") if post else ""
+    # Avoid markdown errors by using HTML
     await query.edit_message_text(
-        f"✏️ *Редактирование текста*\n\nТекущий текст:\n_{current}_\n\nНапиши новый текст поста:",
-        parse_mode=ParseMode.MARKDOWN
+        f"✏️ <b>Редактирование текста</b>\n\nТекущий текст:\n<i>{current}</i>\n\nНапиши новый текст поста:",
+        parse_mode=ParseMode.HTML
     )
     return WAIT_EDIT_TEXT
 
 async def edit_text_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_post(context.user_data.get("editing_id"), {"text": update.message.text})
-    await update.message.reply_text("✅ Текст обновлён!", reply_markup=main_reply_kb())
+    await update.message.reply_text("✅ Текст обновлён!", reply_markup=main_reply_kb(update.effective_user.id))
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -1394,7 +1730,7 @@ async def edit_date_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.delete()
     except:
         pass
-    await context.bot.send_message(query.message.chat_id, f"✅ Дата обновлена: `{dt_str}`", parse_mode=ParseMode.MARKDOWN, reply_markup=main_reply_kb())
+    await context.bot.send_message(query.message.chat_id, f"✅ Дата обновлена: `{dt_str}`", parse_mode=ParseMode.MARKDOWN, reply_markup=main_reply_kb(update.effective_user.id))
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -1403,7 +1739,7 @@ async def edit_date_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         datetime.strptime(text, "%d.%m.%Y %H:%M")
         update_post(context.user_data.get("editing_id"), {"publish_at": text, "status": "pending"})
-        await update.message.reply_text("✅ Дата обновлена!", reply_markup=main_reply_kb())
+        await update.message.reply_text("✅ Дата обновлена!", reply_markup=main_reply_kb(update.effective_user.id))
         context.user_data.clear()
         return ConversationHandler.END
     except ValueError:
@@ -1415,14 +1751,18 @@ async def edit_date_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    if query:
+        await query.answer()
+        send = query.edit_message_text
+    else:
+        send = update.message.reply_text
     posts     = load_posts()
     total     = len(posts)
     pending   = len([p for p in posts if p.get("status") == "pending"])
     published = len([p for p in posts if p.get("status") == "published"])
     ai_posts  = len([p for p in posts if p.get("source") == "ai"])
     ai_status = "✅ Настроен" if OPENROUTER_KEY else "❌ Не настроен (добавь OPENROUTER_KEY в .env)"
-    await query.edit_message_text(
+    await send(
         f"⚙️ <b>Настройки</b>\n\n"
         f"📢 Канал: <code>{TARGET_CHANNEL}</code>\n"
         f"👤 Admin ID: <code>{ADMIN_ID}</code>\n"
@@ -1431,7 +1771,7 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📋 Всего постов: {total}\n"
         f"⏳ Ожидают публикации: {pending}\n"
         f"✅ Опубликовано: {published}\n"
-        f"🤖 ИИ-вакансий: {ai_posts}",
+        f"🤖 Сгенерированных: {ai_posts}",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="back_menu")]])
     )
@@ -1502,7 +1842,7 @@ async def run():
             MessageHandler(filters.Regex("^✏️ Создать пост$"), create_post_start)
         ],
         states={
-            WAIT_TEXT    : [MessageHandler(filters.TEXT, got_text)],
+            WAIT_TEXT    : [MessageHandler(filters.TEXT & ~filters.Regex(MENU_REGEX), got_text)],
             WAIT_MEDIA   : [
                 MessageHandler(filters.PHOTO | filters.VIDEO, got_media),
                 CallbackQueryHandler(skip_media, pattern="^media_skip$"),
@@ -1510,31 +1850,40 @@ async def run():
             ],
             WAIT_BUTTONS : [
                 CallbackQueryHandler(buttons_callback, pattern="^(btn_done|btn_clear)$"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, got_buttons_text),
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_REGEX), got_buttons_text),
             ],
             WAIT_SCHEDULE: [CallbackQueryHandler(got_schedule, pattern="^sched_")],
-            WAIT_DATE    : [MessageHandler(filters.TEXT & ~filters.COMMAND, got_date)],
-            WAIT_TIME    : [MessageHandler(filters.TEXT & ~filters.COMMAND, got_time)],
+            WAIT_DATE    : [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_REGEX), got_date)],
+            WAIT_TIME    : [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_REGEX), got_time)],
             WAIT_REPEAT  : [
-                MessageHandler(filters.TEXT, got_repeat_text),
+                MessageHandler(filters.TEXT & ~filters.Regex(MENU_REGEX), got_repeat_text),
                 CallbackQueryHandler(got_repeat_cb, pattern="^repeat_skip$"),
             ],
         },
         fallbacks=[
             CommandHandler("menu", menu_cmd),
             CallbackQueryHandler(back_menu, pattern="^back_menu$")
-        ],
+        , MessageHandler(filters.Regex(MENU_REGEX), menu_fallback)],
         per_message=False,
     ))
 
     # ── ИИ-генерация вакансии (прямая, без уточнений)
     app.add_handler(CallbackQueryHandler(ai_gen_start, pattern="^ai_gen_(remote|courier)$"))
+    app.add_handler(ConversationHandler(
+        entry_points=[CallbackQueryHandler(ai_gen_custom_start, pattern="^ai_gen_custom_start$")],
+        states={
+            AI_WAIT_CUSTOM_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_REGEX), ai_got_custom_topic)]
+        },
+        fallbacks=[CommandHandler("menu", menu_cmd), MessageHandler(filters.Regex(MENU_REGEX), menu_fallback)],
+        per_message=False,
+    ))
+
 
     # ── Редактирование текста
     app.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(edit_text_start, pattern="^edittext_")],
-        states={WAIT_EDIT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_text_done)]},
-        fallbacks=[CommandHandler("menu", menu_cmd)],
+        states={WAIT_EDIT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_REGEX), edit_text_done)]},
+        fallbacks=[CommandHandler("menu", menu_cmd), MessageHandler(filters.Regex(MENU_REGEX), menu_fallback)],
         per_message=False,
     ))
 
@@ -1544,10 +1893,10 @@ async def run():
         states={
             WAIT_EDIT_DATE: [
                 CallbackQueryHandler(edit_date_cb,  pattern="^sched_"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_date_text),
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_REGEX), edit_date_text),
             ],
         },
-        fallbacks=[CommandHandler("menu", menu_cmd)],
+        fallbacks=[CommandHandler("menu", menu_cmd), MessageHandler(filters.Regex(MENU_REGEX), menu_fallback)],
         per_message=False,
     ))
 
@@ -1555,9 +1904,9 @@ async def run():
     app.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(ai_edit_text_start, pattern="^ai_edit_text$")],
         states={
-            AI_WAIT_EDIT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ai_edit_text_done)],
+            AI_WAIT_EDIT_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_REGEX), ai_edit_text_done)],
         },
-        fallbacks=[CommandHandler("menu", menu_cmd)],
+        fallbacks=[CommandHandler("menu", menu_cmd), MessageHandler(filters.Regex(MENU_REGEX), menu_fallback)],
         per_message=False,
     ))
 
@@ -1570,6 +1919,8 @@ async def run():
     app.add_handler(MessageHandler(filters.Regex("^📋 Список постов$"), edit_list))
     app.add_handler(MessageHandler(filters.Regex("^⚙️ Настройки$"), settings))
     app.add_handler(MessageHandler(filters.Regex("^❓ Помощь$"), help_menu))
+    app.add_handler(MessageHandler(filters.Regex("^👤 Мой профиль$"), user_profile))
+    app.add_handler(MessageHandler(filters.Regex("^👑 Админ-панель$"), admin_panel))
 
     app.add_handler(CallbackQueryHandler(ai_gen_quick,    pattern="^ai_gen_quick_remote$"))
     app.add_handler(CallbackQueryHandler(ai_vacancy_menu,        pattern="^ai_vacancy_menu$"))
@@ -1580,6 +1931,44 @@ async def run():
     app.add_handler(CallbackQueryHandler(edit_list,              pattern="^edit_list$"))
     app.add_handler(CallbackQueryHandler(settings,               pattern="^settings$"))
     app.add_handler(CallbackQueryHandler(help_menu,              pattern="^help_menu$"))
+
+
+    app.add_handler(ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_edit_prompt_start, pattern="^admin_edit_prompt$")],
+        states={
+            ADMIN_WAIT_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_REGEX), admin_edit_prompt_done)]
+        },
+        fallbacks=[CommandHandler("menu", menu_cmd), MessageHandler(filters.Regex(MENU_REGEX), menu_fallback)],
+        per_message=False,
+    ))
+
+    app.add_handler(CallbackQueryHandler(admin_panel, pattern="^admin_panel$"))
+    app.add_handler(CallbackQueryHandler(admin_users, pattern="^admin_users$"))
+
+    app.add_handler(ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_edit_markup_start, pattern="^admin_edit_markup$")],
+        states={
+            ADMIN_WAIT_MARKUP: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_REGEX), admin_edit_markup_done)]
+        },
+        fallbacks=[CommandHandler("menu", menu_cmd), MessageHandler(filters.Regex(MENU_REGEX), menu_fallback)],
+        per_message=False,
+    ))
+
+    app.add_handler(ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_add_balance_start, pattern="^admin_add_balance_start$")],
+        states={
+            ADMIN_WAIT_BALANCE_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_REGEX), admin_add_balance_user)],
+            ADMIN_WAIT_BALANCE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(MENU_REGEX), admin_add_balance_amount)]
+        },
+        fallbacks=[CommandHandler("menu", menu_cmd), MessageHandler(filters.Regex(MENU_REGEX), menu_fallback)],
+        per_message=False,
+    ))
+
+    app.add_handler(CallbackQueryHandler(admin_billing, pattern="^admin_billing$"))
+
+
+    app.add_handler(CallbackQueryHandler(admin_prompt, pattern="^admin_prompt$"))
+
     app.add_handler(CallbackQueryHandler(back_menu,              pattern="^back_menu$"))
     app.add_handler(CallbackQueryHandler(view_post,              pattern="^post_"))
     app.add_handler(CallbackQueryHandler(pub_now,                pattern="^pubnow_"))
